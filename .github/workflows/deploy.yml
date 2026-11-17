@@ -53,11 +53,11 @@ jobs:
         run: docker build --build-arg APP_VERSION=${{ github.sha }} -t "${{ steps.meta.outputs.image }}" .
 
       - name: Scan image for vulnerabilities (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: ${{ steps.meta.outputs.image }}
-          severity: CRITICAL,HIGH
-          exit-code: "0"   # report only; change to "1" to fail the pipeline
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image --severity CRITICAL,HIGH \
+            --exit-code 0 "${{ steps.meta.outputs.image }}"
+          # report only; change --exit-code to 1 to fail the pipeline on findings
 
       - name: Push image
         run: docker push "${{ steps.meta.outputs.image }}"
