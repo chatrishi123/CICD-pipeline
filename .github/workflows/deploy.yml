@@ -1,0 +1,95 @@
+name: CI/CD - build, push to ECR, deploy to EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-southeast-2
+  ECR_REPOSITORY: cicd
+  CONTAINER_NAME: cicd-demo
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Run unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -v
+
+  build-and-push:
+    name: Build image and push to ECR
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Compute image name
+        id: meta
+        run: echo "image=${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: docker build --build-arg APP_VERSION=${{ github.sha }} -t "${{ steps.meta.outputs.image }}" .
+
+      - name: Scan image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}
+          severity: CRITICAL,HIGH
+          exit-code: "0"   # report only; change to "1" to fail the pipeline
+
+      - name: Push image
+        run: docker push "${{ steps.meta.outputs.image }}"
+
+  deploy:
+    name: Deploy to EC2
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare SSH key
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key
+          chmod 600 ~/.ssh/ec2_key
+
+      - name: Pull and restart container on EC2
+        run: |
+          ssh -i ~/.ssh/ec2_key -o StrictHostKeyChecking=accept-new \
+            ec2-user@${{ secrets.EC2_HOST }} <<'EOF'
+          set -e
+          IMAGE="${{ needs.build-and-push.outputs.image }}"
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} \
+            | docker login --username AWS --password-stdin "${IMAGE%%/*}"
+          docker pull "$IMAGE"
+          docker rm -f ${{ env.CONTAINER_NAME }} || true
+          docker run -d --name ${{ env.CONTAINER_NAME }} --restart unless-stopped \
+            -p 80:5000 "$IMAGE"
+          docker image prune -f
+          EOF
+
+      - name: Smoke test the live app
+        run: |
+          sleep 10
+          curl --fail --retry 5 --retry-delay 5 http://${{ secrets.EC2_HOST }}/health
+          curl --fail http://${{ secrets.EC2_HOST }}/
