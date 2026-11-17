@@ -11,7 +11,7 @@ APP_VERSION = os.environ.get("APP_VERSION", "dev")
 
 @app.route("/")
 def index():
-    return jsonify(message="Hello from the CI/CD pipeline!", version=APP_VERSION)
+    return jsonify(message="Hello from the CI/CD pipeline! (v2)", version=APP_VERSION)
 
 
 @app.route("/health")
